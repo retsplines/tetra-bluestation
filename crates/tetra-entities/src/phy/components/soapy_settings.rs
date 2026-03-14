@@ -1,0 +1,191 @@
+//! Device-specific SoapySDR settings
+
+use tetra_config::bluestation::sec_phy_soapy::*;
+
+/// Performance for some SDRs can be optimized by using different settings
+/// for different operating modes of the stack.
+/// For BS or MS mode, we want low latency at a fairly low sample rate.
+/// For monitor mode, a high sample rate is needed,
+/// so we want to maximize throughput, but latency is not critical.
+#[derive(Debug, PartialEq)]
+pub enum Mode {
+    Bs,
+    Ms,
+    Mon,
+}
+
+#[derive(Clone, Debug)]
+pub struct SdrSettings {
+    /// Name used to print which SDR was detected
+    pub name: String,
+    /// Receive and transmit sample rate.
+    pub fs: f64,
+    /// Receive antenna
+    pub rx_ant: Option<String>,
+    /// Transmit antenna
+    pub tx_ant: Option<String>,
+    /// Receive gains
+    pub rx_gain: Vec<(String, f64)>,
+    /// Transmit gains
+    pub tx_gain: Vec<(String, f64)>,
+
+    /// Receive stream arguments
+    pub rx_args: Vec<(String, String)>,
+    /// Transmit stream arguments
+    pub tx_args: Vec<(String, String)>,
+}
+
+impl SdrSettings {
+    /// Get device arguments based on IO configuration
+    pub fn get_device_arguments(io_cfg: &SoapySdrIoCfg) -> Vec<(String, String)> {
+        let mut args = Vec::<(String, String)>::new();
+
+        args.push(("driver".to_string(), io_cfg.get_soapy_driver_name().to_string()));
+
+        // Add custom device arguments here if needed for some SDR
+
+        args
+    }
+
+    /// Get settings based on SDR type
+    pub fn get_settings(
+        io_cfg: &SoapySdrIoCfg,
+        driver_key: &str,
+        hardware_key: &str,
+        mode: Mode,
+    ) -> Self {
+        match (driver_key, hardware_key) {
+            (_, "LimeSDR-USB") =>
+                Self::settings_limesdr(&io_cfg.iocfg_limesdr, mode, LimeSDRModel::LimeSDR),
+            (_, "LimeSDR-Mini_v2") =>
+                Self::settings_limesdr(&io_cfg.iocfg_limesdr, mode, LimeSDRModel::LimeSDRMini),
+
+            ("sx", _) =>
+                Self::settings_sxceiver(&io_cfg.iocfg_sxceiver),
+
+            ("uhd", _) | ("b200", _) =>
+                Self::settings_usrp_b2x0(&io_cfg.iocfg_usrpb2xx, mode),
+
+            _ => Self::unknown(mode),
+        }
+    }
+
+    fn unknown(mode: Mode) -> Self {
+        SdrSettings {
+            name: "Unknown SDR device".to_string(),
+            fs: if mode == Mode::Mon { 16384e3 } else { 512e3 },
+            rx_ant: None,
+            tx_ant: None,
+            rx_gain: vec![],
+            tx_gain: vec![],
+            rx_args: vec![],
+            tx_args: vec![],
+        }
+    }
+
+    fn settings_limesdr(cfg: &Option<CfgLimeSdr>, mode: Mode, model: LimeSDRModel) -> Self {
+        // If cfg is None, use default which sets all optional fields to None.
+        let cfg = if let Some(cfg) = cfg { &cfg } else { &CfgLimeSdr::default() };
+
+        SdrSettings {
+            name: format!("{:?}", model),
+            fs: if mode == Mode::Mon { 16384e3 } else { 512e3 },
+
+            rx_ant: Some(cfg.rx_ant.clone().unwrap_or(match model {
+                LimeSDRModel::LimeSDR => "LNAL",
+                LimeSDRModel::LimeSDRMini => "LNAW",
+            }.to_string())),
+            tx_ant: Some(cfg.tx_ant.clone().unwrap_or(match model {
+                LimeSDRModel::LimeSDR => "BAND1",
+                LimeSDRModel::LimeSDRMini => "BAND2",
+            }.to_string())),
+
+            rx_gain: vec![
+                ("LNA".to_string(), cfg.rx_gain_lna.unwrap_or(18.0)),
+                ("TIA".to_string(), cfg.rx_gain_tia.unwrap_or(6.0)),
+                ("PGA".to_string(), cfg.rx_gain_pga.unwrap_or(0.0)),
+            ],
+            tx_gain: vec![
+                ("PAD".to_string(), cfg.tx_gain_pad.unwrap_or(30.0)),
+                ("IAMP".to_string(), cfg.tx_gain_iamp.unwrap_or(6.0)),
+            ],
+
+            // Minimum latency for BS/MS, maximum throughput for monitor
+            rx_args: vec![
+                ("latency".to_string(), if mode == Mode::Mon { "1" } else { "0" }.to_string()),
+            ],
+            tx_args: vec![
+                ("latency".to_string(), if mode == Mode::Mon { "1" } else { "0" }.to_string()),
+            ],
+        }
+    }
+
+    fn settings_sxceiver(cfg: &Option<CfgSxCeiver>) -> Self {
+        // If cfg is None, use default which sets all optional fields to None.
+        let cfg = if let Some(cfg) = cfg { &cfg } else { &CfgSxCeiver::default() };
+
+        let fs = 600e3;
+        SdrSettings {
+            name: "SXceiver".to_string(),
+            fs: fs,
+
+            rx_ant: Some(cfg.rx_ant.clone().unwrap_or("RX".to_string())),
+            tx_ant: Some(cfg.tx_ant.clone().unwrap_or("TX".to_string())),
+
+            rx_gain: vec![
+                ("LNA".to_string(), cfg.rx_gain_lna.unwrap_or(42.0)),
+                ("PGA".to_string(), cfg.rx_gain_pga.unwrap_or(16.0)),
+            ],
+            tx_gain: vec![
+                ("DAC".to_string(), cfg.tx_gain_dac.unwrap_or(9.0)),
+                ("MIXER".to_string(), cfg.tx_gain_mixer.unwrap_or(30.0)),
+            ],
+
+            rx_args: vec![
+                ("period".to_string(), block_size(fs).to_string()),
+            ],
+            tx_args: vec![
+                ("period".to_string(), block_size(fs).to_string()),
+            ],
+        }
+    }
+
+    fn settings_usrp_b2x0(cfg: &Option<CfgUsrpB2xx>, mode: Mode) -> Self {
+        // If cfg is None, use default which sets all optional fields to None.
+        let cfg = if let Some(cfg) = cfg { &cfg } else { &CfgUsrpB2xx::default() };
+
+        SdrSettings {
+            name: "USRP B200/B210".to_string(),
+            fs: if mode == Mode::Mon { 16384e3 } else { 512e3 },
+
+            rx_ant: Some(cfg.rx_ant.clone().unwrap_or("TX/RX".to_string())),
+            tx_ant: Some(cfg.tx_ant.clone().unwrap_or("TX/RX".to_string())),
+
+            rx_gain: vec![
+                ("PGA".to_string(), cfg.rx_gain_pga.unwrap_or(50.0)),
+            ],
+            tx_gain: vec![
+                ("PGA".to_string(), cfg.tx_gain_pga.unwrap_or(35.0)),
+            ],
+
+            rx_args: vec![],
+            tx_args: vec![],
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum LimeSDRModel {
+    LimeSDR,
+    LimeSDRMini,
+}
+
+
+/// Get processing block size in samples for a given sample rate.
+/// This can be used to optimize performance for some SDRs.
+pub fn block_size(fs: f64) -> usize {
+    // With current FCFB parameters processing blocks are 1.5 ms long.
+    // It is a bit bug prone to have it here in case
+    // FCFB parameters are changed, but it makes things simpler for now.
+    (fs * 1.5e-3).round() as usize
+}
