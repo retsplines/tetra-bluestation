@@ -189,13 +189,40 @@ impl Llc {
         }
     }
 
-    fn rx_tla_tlunitdata_req_bl(&mut self, _queue: &mut MessageQueue, message: SapMsg) {
+    fn rx_tla_tlunitdata_req_bl(&mut self, queue: &mut MessageQueue, message: SapMsg) {
         tracing::trace!("rx_tla_tlunitdata_req_bl");
-        let SapMsgInner::TlaTlUnitdataReqBl(_prim) = message.msg else {
+        let SapMsgInner::TlaTlUnitdataReqBl(mut prim) = message.msg else {
             panic!()
         };
 
-        unimplemented_log!("rx_tla_tlunitdata_req_bl");
+        let mut pdu_buf = BitBuffer::new_autoexpand(32);
+        let pdu = BlUdata { has_fcs: false };
+        pdu.to_bitbuf(&mut pdu_buf);
+        let sdu_len = prim.tl_sdu.get_len_remaining();
+        pdu_buf.copy_bits(&mut prim.tl_sdu, sdu_len);
+        pdu_buf.seek(0);
+        tracing::debug!("-> {:?} sdu {}", pdu, pdu_buf.dump_bin());
+
+        let sapmsg = SapMsg {
+            sap: Sap::TmaSap,
+            src: self.entity(),
+            dest: TetraEntity::Umac,
+            dltime: message.dltime,
+            msg: SapMsgInner::TmaUnitdataReq(TmaUnitdataReq {
+                req_handle: prim.req_handle,
+                pdu: pdu_buf,
+                main_address: prim.main_address,
+                endpoint_id: prim.endpoint_id,
+                stealing_permission: prim.stealing_permission,
+                subscriber_class: prim.subscriber_class,
+                air_interface_encryption: prim.air_interface_encryption,
+                stealing_repeats_flag: None, // todo fixme
+                data_category: prim.data_class_info,
+                chan_alloc: None, // todo fixme
+                tx_reporter: None,
+            }),
+        };
+        queue.push_back(sapmsg);
     }
 
     /// Schedules a message that was not acked in time for a retransmission
@@ -227,7 +254,17 @@ impl Llc {
         //    established LLC link with individual group members. Using BL-DATA
         //    causes radios (e.g. Sepura) to silently discard frames when the
         //    ns sequence number doesn't match their V(R).
+
+        // TODO FIXME: TL-DATA should NEVER be used for point-to-multipoint (GSSI) comms
+        // We need to refactor and prevent that from happening
         if prim.stealing_permission || prim.main_address.ssi_type == SsiType::Gssi {
+            if prim.main_address.ssi_type == SsiType::Gssi {
+                tracing::debug!(
+                    "Forcing unacknowledged mode for GSSI-addressed message to {}",
+                    prim.main_address.ssi
+                );
+            }
+
             let mut pdu_buf = BitBuffer::new_autoexpand(32);
             let pdu = BlUdata { has_fcs: false };
             pdu.to_bitbuf(&mut pdu_buf);

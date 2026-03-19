@@ -53,6 +53,10 @@ pub struct CfgCellInfo {
     pub frame_18_ext: bool,
 
     pub local_ssi_ranges: SortedDisjointSsiRanges,
+
+    /// IANA timezone name (e.g. "Europe/Amsterdam"). When set, enables D-NWRK-BROADCAST
+    /// time broadcasting so MSs can synchronize their clocks.
+    pub timezone: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -89,6 +93,8 @@ pub struct CellInfoDto {
     pub frame_18_ext: Option<bool>,
 
     pub local_ssi_ranges: Option<Vec<(u32, u32)>>,
+
+    pub timezone: Option<String>,
 
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
@@ -127,5 +133,6 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
             .local_ssi_ranges
             .map(SortedDisjointSsiRanges::from_vec_tuple)
             .unwrap_or(SortedDisjointSsiRanges::from_vec_ssirange(vec![])),
+        timezone: ci.timezone,
     }
 }
