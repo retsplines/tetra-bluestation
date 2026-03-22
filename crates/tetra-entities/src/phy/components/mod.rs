@@ -14,6 +14,7 @@ pub mod soapyio;
 
 pub mod soapy_dev;
 // pub mod _rxtxdev_buffer;
+pub mod null_dev;
 
 pub mod slotter;
 

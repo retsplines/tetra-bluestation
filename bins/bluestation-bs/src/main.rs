@@ -1,4 +1,5 @@
 use clap::Parser;
+use tetra_entities::phy::components::null_dev::RxTxDevNull;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +8,7 @@ use tetra_config::bluestation::{PhyBackend, SharedConfig, StackMode, parsing};
 use tetra_core::{TdmaTime, debug};
 use tetra_entities::MessageRouter;
 use tetra_entities::brew::entity::BrewEntity;
+use std::io::BufRead as _;
 use tetra_entities::{
     cmce::cmce_bs::CmceBs,
     llc::llc_bs_ms::Llc,
@@ -38,6 +40,10 @@ fn build_bs_stack(cfg: &mut SharedConfig) -> MessageRouter {
         PhyBackend::SoapySdr => {
             let rxdev = RxTxDevSoapySdr::new(cfg);
             let phy = PhyBs::new(cfg.clone(), rxdev);
+            router.register_entity(Box::new(phy));
+        }
+        PhyBackend::None => {
+            let phy = PhyBs::new(cfg.clone(), RxTxDevNull::new());
             router.register_entity(Box::new(phy));
         }
         _ => {
@@ -83,9 +89,13 @@ fn build_bs_stack(cfg: &mut SharedConfig) -> MessageRouter {
 )]
 
 struct Args {
+
+    #[arg(short, long, help = "Run interactively, accepting commands via standard")]
+    interactive: bool,
+
     /// Config file (required)
     #[arg(help = "TOML config with network/cell parameters")]
-    config: String,
+    config: String
 }
 
 fn main() {
@@ -118,6 +128,45 @@ fn main() {
     })
     .expect("failed to set Ctrl+C handler");
 
+    // Optional stdin command loop (runs in background)
+    let stdin_running = running.clone();
+    std::thread::spawn(move || {
+
+        let stdin = std::io::stdin();
+        let mut lines = stdin.lock().lines();
+
+        eprintln!("Interactive mode.");
+        eprintln!("Type 'help' for a list of commands.");
+
+        while stdin_running.load(Ordering::SeqCst) {
+            match lines.next() {
+                Some(Ok(line)) => match line.trim() {
+                    "quit" | "exit" | "q" => {
+                        stdin_running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    "show" => {
+                        // Show registered SSIs
+                        let subscribers = cfg.state_read().subscribers.clone();
+                        eprintln!("{:?}", subscribers);
+                    },
+                    "" => {}
+                    cmd => {
+                        eprintln!("stdin: unknown command '{cmd}'");
+                    }
+                },
+                Some(Err(e)) => {
+                    eprintln!("stdin read error: {e}");
+                    break;
+                }
+                None => {
+                    // EOF on stdin
+                    stdin_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+    });
     router.run_stack(None, Some(running));
     // router drops here → entities are dropped → BrewEntity::Drop fires teardown
 }
