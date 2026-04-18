@@ -36,7 +36,7 @@ pub enum Sap {
     TnsdsSap,
 
     /// MLE/SNDCP
-    TlpdSap,
+    LtpdSap,
 
     /// MM -> User
     TnmmSap,

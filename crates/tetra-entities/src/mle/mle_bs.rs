@@ -174,9 +174,9 @@ impl MleBs {
                     chan_change_handle: None,    // TODO FIXME
                 };
                 let msg = SapMsg {
-                    sap: Sap::LcmcSap,
+                    sap: Sap::LtpdSap,
                     src: TetraEntity::Mle,
-                    dest: TetraEntity::Cmce,
+                    dest: TetraEntity::Sndcp,
                     dltime: message.dltime,
                     msg: SapMsgInner::LtpdMleUnitdataInd(m),
                 };
@@ -472,7 +472,7 @@ impl TetraEntityTrait for MleBs {
             Sap::LmmSap => {
                 self.rx_lmm_prim(queue, message);
             }
-            Sap::TlpdSap => {
+            Sap::LtpdSap => {
                 self.rx_tlpd_prim(queue, message);
             }
             Sap::LcmcSap => {

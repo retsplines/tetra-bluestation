@@ -978,9 +978,6 @@ impl UmacBs {
             }
         };
 
-        // Pass completed block to LLC
-        tracing::debug!("rx_mac_end_hu: sdu: {:?}", defragbuf.buffer.dump_bin());
-
         let m = SapMsg {
             sap: Sap::TmaSap,
             src: TetraEntity::Umac,
