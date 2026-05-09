@@ -1,3 +1,5 @@
+use tetra_core::{SsiType};
+
 /// 14.8.17c Communication type
 /// Bits: 2
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,18 @@ impl std::convert::TryFrom<u64> for CommunicationType {
             2 => Ok(CommunicationType::P2MpAcked),
             3 => Ok(CommunicationType::Broadcast),
             _ => Err(()),
+        }
+    }
+}
+
+// Turn this into an SSIType
+impl Into<SsiType> for CommunicationType {
+    fn into(self) -> SsiType {
+        match self {
+            CommunicationType::P2p => SsiType::Issi,
+            CommunicationType::P2Mp => SsiType::Gssi,
+            CommunicationType::P2MpAcked => SsiType::Gssi,
+            CommunicationType::Broadcast => panic!("Not valid to convert CommunicationType::Broadcast into an SsiType"),
         }
     }
 }
