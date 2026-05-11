@@ -1,5 +1,5 @@
 use core::fmt;
-
+use std::ops::Not;
 use crate::cmce::enums::call_timeout::CallTimeout;
 use crate::cmce::enums::transmission_grant::TransmissionGrant;
 use crate::cmce::enums::{cmce_pdu_type_dl::CmcePduTypeDl, type3_elem_id::CmceType3ElemId};
@@ -126,7 +126,7 @@ impl DConnect {
         // Type1
         buffer.write_bits(self.transmission_grant as u64, 2);
         // Type1
-        buffer.write_bits(self.transmission_request_permission as u64, 1);
+        buffer.write_bits(self.transmission_request_permission.not() as u64, 1);
         // Type1
         buffer.write_bits(self.call_ownership as u64, 1);
 

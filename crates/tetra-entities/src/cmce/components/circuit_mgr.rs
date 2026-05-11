@@ -312,6 +312,11 @@ impl CircuitMgr {
                 if let Some(circuit) = circuit {
                     let age = circuit.ts_created.age(dltime);
 
+                    // Ignore circuits involved in P2P calls
+                    if circuit.comm_type == CommunicationType::P2p {
+                        continue;
+                    }
+
                     // Send D-SETUP for the initial frame + 1 backup frame after circuit creation.
                     // Matches ETSI Annex D Figure D.2: 1 initial + 1 back-up on MCCH.
                     if age < frames!(D_SETUP_REPEATS) {

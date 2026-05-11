@@ -17,6 +17,9 @@ use tetra_pdus::cmce::{
     },
     structs::cmce_circuit::CmceCircuit,
 };
+use tetra_pdus::cmce::pdus::d_alert::DAlert;
+use tetra_pdus::cmce::pdus::d_connect_acknowledge::DConnectAcknowledge;
+use tetra_pdus::cmce::pdus::u_alert::UAlert;
 use tetra_pdus::cmce::pdus::u_connect::UConnect;
 use tetra_saps::{
     SapMsg, SapMsgInner,
@@ -69,9 +72,22 @@ enum CallOrigin {
 /// The state of a call.
 /// Helps track the progress of hook-signalled calls.
 /// Direct-signalled calls jump straight to Connected.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum CallState {
+
+    /// U-SETUP has been received
+    Requested,
+
+    /// D-SETUP & D-CALL PROCEEDING have been sent
+    SetupSent,
+
+    /// U-ALERT has been received
     Ringing,
+
+    /// U-CONNECT has been received
+    Answered,
+
+    /// D-CONNECT ACKNOWLEDGE has been sent
     Connected
 }
 
@@ -429,9 +445,100 @@ impl CcBsSubentity {
 
     }
 
+    ///
+    /// Handle the receipt of a U-ALERT PDU from an MS.
+    /// This indicates that the called MS is alerting (ringing).
+    ///
+    /// We need to tell the calling MS that the called MS is alerting.
+    ///
+    /// TODO: This should probably cause a call state update.
+    ///
+    fn rx_u_alert(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
+
+        tracing::info!("rx_u_alert: {:?}", message);
+
+        let SapMsgInner::LcmcMleUnitdataInd(prim) = &mut message.msg else {
+            panic!()
+        };
+
+        let called_party = prim.received_tetra_address;
+
+        let pdu = match UAlert::from_bitbuf(&mut prim.sdu) {
+            Ok(pdu) => {
+                tracing::debug!("<- {:?}", pdu);
+                pdu
+            }
+            Err(e) => {
+                tracing::warn!("Failed parsing U-ALERT: {:?} {}", e, prim.sdu.dump_bin());
+                return;
+            }
+        };
+
+        tracing::info!("Called party {} is alerting with call_id={}", called_party, pdu.call_identifier);
+
+        // Find the call, and if valid, update state and send D-ALERT to the calling party
+        let call = match self.calls.get_mut(&pdu.call_identifier) {
+            Some(call) => call,
+            None => {
+                tracing::warn!("Received U-ALERT for unknown call_id={}", pdu.call_identifier);
+                return;
+            }
+        };
+
+        call.state = CallState::Ringing;
+
+        // Generate a D-ALERT to notify the calling party that the called party is alerting
+        let d_alert = DAlert {
+            call_identifier: pdu.call_identifier,
+            call_time_out_set_up_phase: CallTimeoutSetupPhase::T30s,
+            reserved: false,
+            simplex_duplex_selection: pdu.simplex_duplex_selection,
+            call_queued: false,
+            basic_service_information: None,
+            notification_indicator: None,
+            facility: None,
+            proprietary: None,
+        };
+
+        let mut alert_sdu = BitBuffer::new_autoexpand(30);
+        d_alert.to_bitbuf(&mut alert_sdu).expect("Failed to serialize DAlert");
+        alert_sdu.seek(0);
+
+        // This message will include the channel allocation for the calling MS
+        let connect_msg = SapMsg {
+            sap: Sap::LcmcSap,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Mle,
+            msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
+                sdu: alert_sdu,
+                handle: 0, // TODO: Check - do we need to store/reuse this from the call?
+                endpoint_id: 0, // TODO: Check - do we need to store/reuse this from the call?
+                link_id: 0, // TODO: Check - do we need to store/reuse this from the call?
+                layer2service: Layer2Service::Unacknowledged,
+                pdu_prio: 0,
+                layer2_qos: 0,
+                stealing_permission: false,
+                stealing_repeats_flag: false,
+                chan_alloc: None,
+                main_address: match call.origin {
+                    CallOrigin::Local { caller_addr } => caller_addr,
+                    CallOrigin::Network { .. } => todo!("Not valid for network-originated calls."),
+                },
+                tx_reporter: None,
+            }),
+        };
+        queue.push_back(connect_msg);
+
+        tracing::info!("Notified caller about alerting called party {} for call_id={}", called_party, pdu.call_identifier);
+    }
+
+    ///
     /// Handle the receipt of a U-CONNECT PDU from an MS.
+    ///
     /// "This PDU shall be the acknowledgement to the SwMI that the called MS is ready
     /// for through-connection." (14.7.2.3)
+    ///
+    /// This PDU basically indicates that a hook signalling call has been "answered".
     fn rx_u_connect(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
 
         tracing::info!("rx_u_connect: {:?}", message);
@@ -453,6 +560,145 @@ impl CcBsSubentity {
             }
         };
 
+        // Find the Call ID, and if valid, transition the call to Connected
+        if let Some(call) = self.calls.get_mut(&pdu.call_identifier) {
+
+            // TODO: More validation here
+            call.state = CallState::Answered;
+
+            let mut timeslots = [false; 4];
+            timeslots[call.ts as usize - 1] = true;
+
+            // Send D-CONNECT to the calling party
+            let d_connect = DConnect {
+                call_identifier: pdu.call_identifier,
+                call_time_out: CallTimeout::T5m,
+                hook_method_selection: pdu.hook_method_selection,
+                simplex_duplex_selection: pdu.simplex_duplex_selection,
+                transmission_grant: TransmissionGrant::NotGranted,
+                transmission_request_permission: true,
+                call_ownership: true,
+                call_priority: None,
+                basic_service_information: None,
+                temporary_address: None,
+                notification_indicator: None,
+                facility: None,
+                proprietary: None,
+            };
+
+            let mut connect_sdu = BitBuffer::new_autoexpand(30);
+            d_connect.to_bitbuf(&mut connect_sdu).expect("Failed to serialize DConnect");
+            connect_sdu.seek(0);
+            tracing::info!("-> {:?} sdu {}", d_connect, connect_sdu.dump_bin());
+
+            // This message will include the channel allocation for the calling MS
+            let connect_msg = SapMsg {
+                sap: Sap::LcmcSap,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Mle,
+                msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
+                    sdu: connect_sdu,
+                    handle: 0, // TODO: Check - do we need to store/reuse this from the call?
+                    endpoint_id: 0, // TODO: Check - do we need to store/reuse this from the call?
+                    link_id: 0, // TODO: Check - do we need to store/reuse this from the call?
+                    layer2service: Layer2Service::Unacknowledged,
+                    pdu_prio: 0,
+                    layer2_qos: 0,
+                    stealing_permission: false,
+                    stealing_repeats_flag: false,
+                    chan_alloc: Some(CmceChanAllocReq {
+                        usage: Some(call.usage),
+                        alloc_type: ChanAllocType::Replace,
+                        carrier: None,
+                        timeslots,
+                        ul_dl_assigned: UlDlAssignment::Both,
+                    }),
+                    main_address: match call.origin {
+                        CallOrigin::Local { caller_addr } => caller_addr,
+                        CallOrigin::Network { .. } => todo!("Not valid for network-originated calls."),
+                    },
+                    tx_reporter: None,
+                }),
+            };
+            queue.push_back(connect_msg);
+
+            // These are the handle, link ID and Endpoint ID of the *called* MS (that just sent the D-CONNECT)
+            let ul_handle = prim.handle;
+            let ul_link_id = prim.link_id;
+            let ul_endpoint_id = prim.endpoint_id;
+        }
+
+    }
+
+    /// Check for any calls in Answered state that need to be sent a D-CONNECT ACKNOWLEDGE to transition to Connected.
+    fn check_answered_calls(&mut self, queue: &mut MessageQueue) {
+
+        let answered: Vec<(&u16, &mut Call)> = self
+            .calls
+            .iter_mut()
+            .filter(|(_, call)| call.state == CallState::Answered)
+            .collect();
+
+        // For each answered call, send D-CONNECT ACKNOWLEDGE and transition to Connected
+        for (call_id, call) in answered {
+
+            Self::send_d_connect_acknowledge(queue, *call_id, call);
+
+            // Update the call state
+            call.state = CallState::Connected;
+
+        }
+    }
+
+    fn send_d_connect_acknowledge(queue: &mut MessageQueue, call_id: u16, call: &Call) {
+
+        let mut timeslots = [false; 4];
+        timeslots[call.ts as usize - 1] = true;
+
+        let d_connect_ack = DConnectAcknowledge {
+            call_identifier: call_id,
+            call_time_out: CallTimeout::T5m,
+            transmission_grant: TransmissionGrant::Granted,
+            transmission_request_permission: true,
+            notification_indicator: None,
+            facility: None,
+            proprietary: None,
+        };
+
+        let mut connect_ack_sdu = BitBuffer::new_autoexpand(30);
+        d_connect_ack.to_bitbuf(&mut connect_ack_sdu).expect("Failed to serialize DConnectAcknowledge");
+        connect_ack_sdu.seek(0);
+        tracing::info!("-> {:?} sdu {}", d_connect_ack, connect_ack_sdu.dump_bin());
+
+        // This message will include the channel allocation for the called MS
+        let connect_ack_msg = SapMsg {
+            sap: Sap::LcmcSap,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Mle,
+            msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
+                sdu: connect_ack_sdu,
+                handle: 0, // TODO: Should be copied from the original U-CONNECT?
+                endpoint_id: 0, // TODO: Should be copied from the original U-CONNECT?
+                link_id: 0, // TODO: Should be copied from the original U-CONNECT?
+                layer2service: Layer2Service::Unacknowledged,
+                pdu_prio: 0,
+                layer2_qos: 0,
+                stealing_permission: false,
+                stealing_repeats_flag: false,
+                chan_alloc: Some(CmceChanAllocReq {
+                    usage: Some(call.usage),
+                    alloc_type: ChanAllocType::Replace,
+                    carrier: None,
+                    timeslots,
+                    ul_dl_assigned: UlDlAssignment::Both,
+                }),
+                main_address: call.dest_addr,
+                tx_reporter: None,
+            }),
+        };
+        queue.push_back(connect_ack_msg);
+
+        tracing::info!("Sending D-CONNECT ACKNOWLEDGE to called party {} with call_id={} ts={} usage={}", call.dest_addr, call_id, call.ts, call.usage);
     }
 
     /// Received a U-SETUP from an MS
@@ -533,7 +779,11 @@ impl CcBsSubentity {
         self.calls.insert(
             circuit.call_id,
             Call {
-                state: CallState::Connected,
+                state: match dest_addr.ssi_type {
+                    SsiType::Issi => CallState::Requested,
+                    SsiType::Gssi => CallState::Connected, // Group calls jump straight to Connected state
+                    _ => panic!("Invalid SSI type"),
+                },
                 origin: CallOrigin::Local {
                     caller_addr: calling_party,
                 },
@@ -546,6 +796,7 @@ impl CcBsSubentity {
                 brew_uuid: None,
             },
         );
+
 
         tracing::info!(
             "rx_u_setup: call from ISSI {} to {} {} → ts={} call_id={} usage={}",
@@ -574,7 +825,6 @@ impl CcBsSubentity {
         let ul_link_id = prim.link_id;
         let ul_endpoint_id = prim.endpoint_id;
 
-
         // === 1) Send D-CALL-PROCEEDING to the calling MS (individually addressed) ===
         // This acknowledges the U-SETUP and keeps the radio from timing out.
         self.send_d_call_proceeding(queue, &message, &pdu, circuit.call_id);
@@ -591,8 +841,12 @@ impl CcBsSubentity {
             hook_method_selection: pdu.hook_method_selection,
             simplex_duplex_selection: pdu.simplex_duplex_selection,
             basic_service_information: pdu.basic_service_information.clone(),
-            transmission_grant: TransmissionGrant::GrantedToOtherUser,
-            transmission_request_permission: false,
+            transmission_grant: if circuit.comm_type == CommunicationType::P2Mp {
+                TransmissionGrant::GrantedToOtherUser
+            } else {
+                TransmissionGrant::NotGranted
+            },
+            transmission_request_permission: circuit.comm_type == CommunicationType::P2p,
             call_priority: pdu.call_priority,
             notification_indicator: None,
             temporary_address: None,
@@ -610,64 +864,86 @@ impl CcBsSubentity {
         self.cached_setups.insert(circuit.call_id, (d_setup, dest_addr, None));
         let (d_setup_ref, _, _) = self.cached_setups.get(&circuit.call_id).unwrap();
 
-        let (setup_sdu, setup_chan_alloc) = Self::build_d_setup_prim(d_setup_ref, circuit.usage, circuit.ts, UlDlAssignment::Both);
-        let setup_msg = Self::build_sapmsg(setup_sdu, Some(setup_chan_alloc), dest_addr, Layer2Service::Unacknowledged, None);
-        queue.push_back(setup_msg);
+        // At this point, if the call is either group-addressed, proceed to send D-CONNECT and transition to Connected.
+        // Otherwise, keep the call in the "Ringing" state until we receive a U-CONNECT from the called party.
+        if dest_addr.ssi_type == SsiType::Gssi {
 
-        // === 3) Send D-CONNECT to the calling MS with Granted + channel allocation ===
-        // This transitions the calling MS from "Call Setup" to "Active".
-        // Uses the correct MLE handle (not 0) so MLE routes it properly.
-        let d_connect = DConnect {
-            call_identifier: circuit.call_id,
-            call_time_out: CallTimeout::T5m,
-            hook_method_selection: pdu.hook_method_selection,
-            simplex_duplex_selection: pdu.simplex_duplex_selection,
-            transmission_grant: TransmissionGrant::Granted,
-            transmission_request_permission: false,
-            call_ownership: true, // Calling MS is the call owner (ETSI 14.8.4)
-            call_priority: None,
-            basic_service_information: None,
-            temporary_address: None,
-            notification_indicator: None,
-            facility: None,
-            proprietary: None,
-        };
+            // Send the D-SETUP *with* channel allocation immediately
+            let (setup_sdu, setup_chan_alloc) =
+                Self::build_d_setup_prim(d_setup_ref, circuit.usage, circuit.ts, UlDlAssignment::Both);
+            let setup_msg = Self::build_sapmsg(setup_sdu, Some(setup_chan_alloc), dest_addr, Layer2Service::Unacknowledged, None);
+            queue.push_back(setup_msg);
 
-        let mut connect_sdu = BitBuffer::new_autoexpand(30);
-        d_connect.to_bitbuf(&mut connect_sdu).expect("Failed to serialize DConnect");
-        connect_sdu.seek(0);
-        tracing::info!("-> {:?} sdu {}", d_connect, connect_sdu.dump_bin());
+            // === 3) Send D-CONNECT to the calling MS with Granted + channel allocation ===
+            // This transitions the calling MS from "Call Setup" to "Active".
+            // Uses the correct MLE handle (not 0) so MLE routes it properly.
+            let d_connect = DConnect {
+                call_identifier: circuit.call_id,
+                call_time_out: CallTimeout::T5m,
+                hook_method_selection: pdu.hook_method_selection,
+                simplex_duplex_selection: pdu.simplex_duplex_selection,
+                transmission_grant: TransmissionGrant::GrantedToOtherUser,
+                transmission_request_permission: true,
+                call_ownership: true, // Calling MS is the call owner (ETSI 14.8.4)
+                call_priority: None,
+                basic_service_information: None,
+                temporary_address: None,
+                notification_indicator: None,
+                facility: None,
+                proprietary: None,
+            };
 
-        // This message will include the channel allocation for the calling MS
-        // This is the "Late Assignment Group Call" case in 14.5.3.1.
-        let connect_msg = SapMsg {
-            sap: Sap::LcmcSap,
-            src: TetraEntity::Cmce,
-            dest: TetraEntity::Mle,
-            msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
-                sdu: connect_sdu,
-                handle: ul_handle,
-                endpoint_id: ul_endpoint_id,
-                link_id: ul_link_id,
-                layer2service: Layer2Service::Unacknowledged,
-                pdu_prio: 0,
-                layer2_qos: 0,
-                stealing_permission: false,
-                stealing_repeats_flag: false,
-                chan_alloc: Some(CmceChanAllocReq {
-                    usage: Some(circuit.usage),
-                    alloc_type: ChanAllocType::Replace,
-                    carrier: None,
-                    timeslots,
-                    ul_dl_assigned: UlDlAssignment::Both,
+            let mut connect_sdu = BitBuffer::new_autoexpand(30);
+            d_connect.to_bitbuf(&mut connect_sdu).expect("Failed to serialize DConnect");
+            connect_sdu.seek(0);
+            tracing::info!("-> {:?} sdu {}", d_connect, connect_sdu.dump_bin());
+
+            // This message will include the channel allocation for the calling MS
+            // This is the "Late Assignment Group Call" case in 14.5.3.1.
+            let connect_msg = SapMsg {
+                sap: Sap::LcmcSap,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Mle,
+                msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
+                    sdu: connect_sdu,
+                    handle: ul_handle,
+                    endpoint_id: ul_endpoint_id,
+                    link_id: ul_link_id,
+                    layer2service: Layer2Service::Unacknowledged,
+                    pdu_prio: 0,
+                    layer2_qos: 0,
+                    stealing_permission: false,
+                    stealing_repeats_flag: false,
+                    chan_alloc: Some(CmceChanAllocReq {
+                        usage: Some(circuit.usage),
+                        alloc_type: ChanAllocType::Replace,
+                        carrier: None,
+                        timeslots,
+                        ul_dl_assigned: UlDlAssignment::Both,
+                    }),
+                    main_address: calling_party,
+                    tx_reporter: None,
                 }),
-                main_address: calling_party,
-                tx_reporter: None,
-            }),
-        };
-        queue.push_back(connect_msg);
+            };
+            queue.push_back(connect_msg);
 
 
+        } else {
+
+            tracing::info!("Sending individual-addressed D-SETUP with no chanalloc: {:?}", d_setup_ref);
+
+            // Send the D-SETUP *with* channel allocation immediately
+            // Also we won't be re-sending late-entry D-SETUPs for individual calls.
+            let (setup_sdu, setup_chan_alloc) =
+                Self::build_d_setup_prim(&d_setup_ref, circuit.usage, circuit.ts, UlDlAssignment::Both);
+            let setup_msg = Self::build_sapmsg(setup_sdu, None, dest_addr, Layer2Service::Unacknowledged, None);
+            queue.push_back(setup_msg);
+
+            // No more activity for this call until we receive a U-CONNECT from the called party.
+            // Call is now "SetupSent"
+            let call = self.calls.get_mut(&circuit.call_id).unwrap();
+            call.state = CallState::SetupSent;
+        }
 
         // Notify Brew entity about this local call if Brew is loaded and the SSI is cleared for Brew
         // It can then forward to TetraPack if the group is subscribed
@@ -710,8 +986,8 @@ impl CcBsSubentity {
             CmcePduTypeUl::URelease => self.rx_u_release(_queue, message),
             CmcePduTypeUl::UDisconnect => self.rx_u_disconnect(_queue, message),
             CmcePduTypeUl::UConnect => self.rx_u_connect(_queue, message),
-            CmcePduTypeUl::UAlert
-            | CmcePduTypeUl::UInfo
+            CmcePduTypeUl::UAlert => self.rx_u_alert(_queue, message),
+            CmcePduTypeUl::UInfo
             | CmcePduTypeUl::UStatus
             | CmcePduTypeUl::UCallRestore => {
                 unimplemented_log!("{}", pdu_type);
@@ -723,7 +999,11 @@ impl CcBsSubentity {
     }
 
     pub fn tick_start(&mut self, queue: &mut MessageQueue, dltime: TdmaTime) {
+
         self.dltime = dltime;
+
+        // Check for any answered calls that need D-CONNECT ACKNOWLEDGE sending to the called party
+        (self).check_answered_calls(queue);
 
         // Check hangtime expiry for active local calls
         self.check_hangtime_expiry(queue);
@@ -731,6 +1011,7 @@ impl CcBsSubentity {
         if let Some(tasks) = self.circuits.tick_start(dltime) {
             for task in tasks {
                 match task {
+
                     CircuitMgrCmd::SendDSetup(call_id, usage, ts) => {
                         // Skip late-entry D-SETUP during hangtime. The traffic channel is still
                         // allocated and sending D-SETUP with NotGranted can prevent floor requests.
@@ -819,6 +1100,8 @@ impl CcBsSubentity {
         let expired: Vec<u16> = self
             .calls
             .iter()
+            // Only group calls
+            .filter(|(_, call)| matches!(call.dest_addr.ssi_type, SsiType::Gssi))
             .filter_map(|(&call_id, call)| {
                 if let Some(hangtime_start) = call.hangtime_start {
                     if hangtime_start.age(self.dltime) > HANGTIME_FRAMES {
@@ -1603,6 +1886,7 @@ impl CcBsSubentity {
     /// Handle UL inactivity timeout from UMAC: a radio disappeared mid-transmission.
     /// Treat identically to rx_u_tx_ceased — force TX ceased, enter hangtime.
     fn handle_ul_inactivity_timeout(&mut self, queue: &mut MessageQueue, ts: u8) {
+
         // Find the active call on this timeslot with tx_active == true
         let call_entry = self
             .calls

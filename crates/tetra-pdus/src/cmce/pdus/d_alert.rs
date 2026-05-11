@@ -4,6 +4,7 @@ use crate::cmce::enums::{cmce_pdu_type_dl::CmcePduTypeDl, type3_elem_id::CmceTyp
 use crate::cmce::fields::basic_service_information::BasicServiceInformation;
 use tetra_core::typed_pdu_fields::*;
 use tetra_core::{BitBuffer, expect_pdu_type, pdu_parse_error::PduParseErr};
+use crate::cmce::enums::call_timeout_setup_phase::CallTimeoutSetupPhase;
 
 /// Representation of the D-ALERT PDU (Clause 14.7.1.1).
 /// This PDU shall be an information to the originating MS that the call is proceeding and the connecting party has been alerted.
@@ -17,7 +18,7 @@ pub struct DAlert {
     /// Type1, 14 bits, Call identifier
     pub call_identifier: u16,
     /// Type1, 3 bits, Call time-out, set-up phase
-    pub call_time_out_set_up_phase: u8,
+    pub call_time_out_set_up_phase: CallTimeoutSetupPhase,
     /// Type1, 1 bits, See note 1,
     pub reserved: bool,
     /// Type1, 1 bits, Simplex/duplex selection
@@ -44,7 +45,9 @@ impl DAlert {
         // Type1
         let call_identifier = buffer.read_field(14, "call_identifier")? as u16;
         // Type1
-        let call_time_out_set_up_phase = buffer.read_field(3, "call_time_out_set_up_phase")? as u8;
+        let val = buffer.read_field(3, "call_time_out_set_up_phase")?;
+        let call_time_out_set_up_phase = CallTimeoutSetupPhase::try_from(val).unwrap();
+        
         // Type1
         let reserved = buffer.read_field(1, "reserved")? != 0;
         // Type1

@@ -1,8 +1,10 @@
 use core::fmt;
-
+use std::ops::Not;
 use crate::cmce::enums::{cmce_pdu_type_dl::CmcePduTypeDl, type3_elem_id::CmceType3ElemId};
 use tetra_core::typed_pdu_fields::*;
 use tetra_core::{BitBuffer, expect_pdu_type, pdu_parse_error::PduParseErr};
+use crate::cmce::enums::call_timeout::CallTimeout;
+use crate::cmce::enums::transmission_grant::TransmissionGrant;
 
 /// Representation of the D-CONNECT ACKNOWLEDGE PDU (Clause 14.7.1.5).
 /// This PDU shall be the order to the called MS to through-connect.
@@ -14,9 +16,9 @@ pub struct DConnectAcknowledge {
     /// Type1, 14 bits, Call identifier
     pub call_identifier: u16,
     /// Type1, 4 bits, Call time-out
-    pub call_time_out: u8,
+    pub call_time_out: CallTimeout,
     /// Type1, 2 bits, Transmission grant
-    pub transmission_grant: u8,
+    pub transmission_grant: TransmissionGrant,
     /// Type1, 1 bits, Transmission request permission
     /// Set to true to signal MSes they are allowed to send a U-TX DEMAND
     pub transmission_request_permission: bool,
@@ -38,9 +40,11 @@ impl DConnectAcknowledge {
         // Type1
         let call_identifier = buffer.read_field(14, "call_identifier")? as u16;
         // Type1
-        let call_time_out = buffer.read_field(4, "call_time_out")? as u8;
+        let val = buffer.read_field(4, "call_time_out")?;
+        let call_time_out = CallTimeout::try_from(val).unwrap();
         // Type1
-        let transmission_grant = buffer.read_field(2, "transmission_grant")? as u8;
+        let val = buffer.read_field(2, "transmission_grant")?;
+        let transmission_grant = TransmissionGrant::try_from(val).unwrap();
         // Type1
         let transmission_request_permission = buffer.read_field(1, "transmission_request_permission")? != 0;
 
@@ -84,7 +88,7 @@ impl DConnectAcknowledge {
         // Type1
         buffer.write_bits(self.transmission_grant as u64, 2);
         // Type1
-        buffer.write_bits(self.transmission_request_permission as u64, 1);
+        buffer.write_bits(self.transmission_request_permission.not() as u64, 1);
 
         // Check if any optional field present and place o-bit
         let obit = self.notification_indicator.is_some() || self.facility.is_some() || self.proprietary.is_some();
