@@ -3,8 +3,12 @@ mod common;
 use tetra_config::bluestation::StackMode;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Layer2Service, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, debug};
+use tetra_pdus::umac::enums::basic_slotgrant_cap_alloc::BasicSlotgrantCapAlloc;
+use tetra_pdus::umac::enums::basic_slotgrant_granting_delay::BasicSlotgrantGrantingDelay;
+use tetra_pdus::umac::pdus::mac_resource::MacResource;
 use tetra_saps::lmm::LmmMleUnitdataReq;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
+use tetra_saps::tma::TmaUnitdataReq;
 use tetra_saps::tmv::{TmvUnitdataInd, enums::logical_chans::LogicalChannel};
 
 use crate::common::ComponentTest;
@@ -165,4 +169,87 @@ fn test_out_fragmented_resource() {
     test.run_stack(Some(8));
 
     tracing::info!("Validation of result not implemented");
+}
+
+#[test]
+fn test_preemptive_slot_grants() {
+
+    // Transmit a PDU that should create a preemptive slot grant
+    let _log_guards = debug::setup_logging_verbose();
+
+    let test_prim = TmaUnitdataReq {
+        req_handle: 0,
+        pdu: BitBuffer::from_bitstr("000000001111111100000000"),
+        main_address: TetraAddress {
+            ssi: 12345,
+            ssi_type: SsiType::Issi,
+        },
+        endpoint_id: 0,
+        stealing_permission: false,
+        subscriber_class: 0,
+        air_interface_encryption: None,
+        stealing_repeats_flag: None,
+        data_category: None,
+        chan_alloc: None,
+        tx_reporter: None,
+        grant_subslot: true,
+    };
+
+    // Setup testing stack
+    // Start time in the middle of a frame so the next MCCH will contain the grant
+    let time = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(time));
+    let components = vec![TetraEntity::Umac];
+    let sinks: Vec<TetraEntity> = vec![TetraEntity::Lmac];
+    test.populate_entities(components, sinks);
+
+    // Submit and process message
+    let test_sapmsg = SapMsg {
+        sap: Sap::TmaSap,
+        src: TetraEntity::Llc,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmaUnitdataReq(test_prim),
+    };
+
+    test.submit_message(test_sapmsg);
+
+    // During this tick, the UMAC will produce the downlink for F01 S4 and process the PDUs ready for F02 S1
+    test.run_stack(Some(1));
+
+    // Dump sinks now, and tick again
+    test.dump_sinks();
+
+    // During this tick, the UMAC will produce the downlink for F02 S1 which should contain our preemptive grant
+    test.run_stack(Some(1));
+
+    let sink_msgs = test.dump_sinks();
+
+    // Must contain a single message from UMAC to LMAC
+    assert_eq!(sink_msgs.len(), 1);
+    let msg = &sink_msgs[0];
+    assert_eq!(msg.sap, Sap::TmvSap);
+    assert_eq!(msg.src, TetraEntity::Umac);
+    assert_eq!(msg.dest, TetraEntity::Lmac);
+
+    // The message should be a TMV-UNITDATA Request
+    match &msg.msg {
+        SapMsgInner::TmvUnitdataReq(req) => {
+
+            // Decode the grant from the PDU
+            let mut mac_block = req.blk1.clone().unwrap().mac_block;
+            let resource = MacResource::from_bitbuf(&mut mac_block).expect("Failed to decode MacResource from grant PDU");
+
+            // Should have a slot grant
+            assert!(resource.slot_granting_element.is_some(), "Expected a slot grant in the MacResource");
+
+            let slot_grant = resource.slot_granting_element.unwrap();
+
+            // Should be immediate and for one slot
+            assert_eq!(slot_grant.capacity_allocation, BasicSlotgrantCapAlloc::Grant1Slot);
+            assert_eq!(slot_grant.granting_delay, BasicSlotgrantGrantingDelay::CapAllocAtNextOpportunity);
+        },
+        _ => panic!("Expected TMV-UNITDATA Request"),
+    }
+
+
 }

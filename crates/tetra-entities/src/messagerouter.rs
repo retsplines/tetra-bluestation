@@ -137,12 +137,13 @@ impl MessageRouter {
     pub fn tick_start(&mut self) {
         // tracing::info!("--- tick dl {} ul {} txdl {} ----------------------------",
         //     self.ts, self.ts.add_timeslots(-2), self.ts.add_timeslots(MACSCHED_TX_AHEAD as i32));
-        tracing::info!("--- tick dl {} ----------------------------", self.ts);
+        tracing::debug!("--- tick dl {} start open ----------------------------", self.ts);
 
         // Call tick on all entities
         for entity in self.entities.values_mut() {
             entity.tick_start(&mut self.msg_queue, self.ts);
         }
+        tracing::debug!("--- tick dl {} start close ----------------------------", self.ts);
     }
 
     /// Executes all end-of-tick functions:
@@ -150,7 +151,7 @@ impl MessageRouter {
     /// - UMAC finalizes any resources for ts and sends down to LMAC
     ///
     pub fn tick_end(&mut self) {
-        tracing::debug!("############################ end-of-tick ############################");
+        tracing::debug!("--- tick dl {} end open ----------------------------", self.ts);
 
         // Llc should send down outstanding BL-ACKs
         let target = TetraEntity::Llc;
@@ -177,6 +178,8 @@ impl MessageRouter {
             entity.tick_end(&mut self.msg_queue, self.ts);
         }
         self.deliver_all_messages();
+
+        tracing::debug!("--- tick dl {} end close ----------------------------", self.ts);
 
         // Increment the TDMA time if set
         self.ts = self.ts.add_timeslots(1);
