@@ -222,12 +222,12 @@ impl LogGuards {
 
 /// Sets up logging with maximum verbosity (trace level)
 /// Mainly for unit tests
-pub fn setup_logging_verbose() {
+pub fn setup_logging_verbose() -> Option<LogGuards> {
     let stdout_filter = EnvFilter::new("trace")
         .add_directive("quinn=info".parse().unwrap())
         .add_directive("quinn_proto=info".parse().unwrap());
 
-    setup_logging(stdout_filter, None);
+    setup_logging(stdout_filter, None)
 }
 
 /// Sets up default logging to stdout and optionally, a verbose log file
