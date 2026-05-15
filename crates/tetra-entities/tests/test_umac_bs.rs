@@ -221,7 +221,6 @@ fn test_preemptive_slot_grants() {
 
     // During this tick, the UMAC will produce the downlink for F02 S1 which should contain our preemptive grant
     test.run_stack(Some(1));
-
     let sink_msgs = test.dump_sinks();
 
     // Must contain a single message from UMAC to LMAC
@@ -237,10 +236,10 @@ fn test_preemptive_slot_grants() {
 
             // Decode the grant from the PDU
             let mut mac_block = req.blk1.clone().unwrap().mac_block;
-            let resource = MacResource::from_bitbuf(&mut mac_block).expect("Failed to decode MacResource from grant PDU");
+            let resource = MacResource::from_bitbuf(&mut mac_block).expect("Failed to decode MacResource");
 
             // Should have a slot grant
-            assert!(resource.slot_granting_element.is_some(), "Expected a slot grant in the MacResource");
+            assert!(resource.slot_granting_element.is_some(), "Expected a basic slot grant in the MacResource");
 
             let slot_grant = resource.slot_granting_element.unwrap();
 
