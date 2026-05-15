@@ -66,6 +66,9 @@ pub struct TmaUnitdataReq {
     /// Optional Channel Allocation Request that may be included by CMCE
     pub chan_alloc: Option<CmceChanAllocReq>,
     pub tx_reporter: Option<TxReporter>,
+
+    /// Indicate to the UMAC that a subslot should be granted for transmission of a response
+    pub grant_subslot: bool
 }
 
 /// Clause 20.4.1.1.4

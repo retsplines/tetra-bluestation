@@ -9,6 +9,7 @@ use tetra_pdus::mle::pdus::d_mle_sync::DMleSync;
 use tetra_pdus::mle::pdus::d_mle_sysinfo::DMleSysinfo;
 use tetra_pdus::umac::enums::mac_pdu_type::MacPduType;
 use tetra_pdus::umac::enums::sysinfo_opt_field_flag::SysinfoOptFieldFlag;
+use tetra_pdus::umac::fields::basic_slotgrant::BasicSlotgrant;
 use tetra_pdus::umac::fields::channel_allocation::ChanAllocElement;
 use tetra_pdus::umac::fields::sysinfo_default_def_for_access_code_a::SysinfoDefaultDefForAccessCodeA;
 use tetra_pdus::umac::fields::sysinfo_ext_services::SysinfoExtendedServices;
@@ -22,6 +23,7 @@ use tetra_pdus::umac::pdus::mac_sync::MacSync;
 use tetra_pdus::umac::pdus::mac_sysinfo::MacSysinfo;
 use tetra_pdus::umac::pdus::mac_u_blck::MacUBlck;
 use tetra_pdus::umac::pdus::mac_u_signal::MacUSignal;
+use tetra_pdus::umac::enums::reservation_requirement::ReservationRequirement;
 use tetra_saps::control::call_control::{CallControl, Circuit};
 use tetra_saps::lcmc::enums::alloc_type::ChanAllocType;
 use tetra_saps::lcmc::enums::ul_dl_assignment::UlDlAssignment;
@@ -1172,6 +1174,34 @@ impl UmacBs {
             (None, None)
         };
 
+        // If the downlink message should invite a response (BL-ACK, other higher-layer PDU) we can
+        // pre-schedule a slot for the response to be sent.
+        let slot_granting_element: Option<BasicSlotgrant> = if prim.grant_subslot {
+
+            // Effectively pretend we got a capacity request just now
+            // TODO: This could perhaps be Req1Subslot, but in testing I found MSs still made a random access attempt
+            let cap_req = ReservationRequirement::Req1Slot;
+
+            // Schedule grant
+            let slot_granting_el = self.channel_scheduler.ul_process_cap_req(
+                self.dltime.t,
+                prim.main_address,
+                &cap_req,
+            );
+
+            tracing::debug!(
+                "rx_ul_tma_unitdata_req: pre-scheduled subslot grant {:?} for {} expected response to this message ({})",
+                slot_granting_el, prim.main_address, self.dltime
+            );
+
+            // If the grant wasn't successful (no capacity, etc) we'll still just return None here so
+            // no grant will be sent
+            slot_granting_el
+
+        } else {
+            None
+        };
+
         // Build MAC-RESOURCE optimistically (as if it would always fit in one slot)
         // random_access_flag: true for SSI-addressed (responses to random access requests),
         // false for GSSI-addressed (unsolicited group signaling like D-SETUP).
@@ -1187,7 +1217,7 @@ impl UmacBs {
             event_label: None,
             usage_marker,
             power_control_element: None,
-            slot_granting_element: None,
+            slot_granting_element,
             chan_alloc_element: mac_chan_alloc,
         };
         pdu.update_len_and_fill_ind(sdu.get_len());

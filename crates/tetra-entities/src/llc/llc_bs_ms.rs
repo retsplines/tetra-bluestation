@@ -230,6 +230,7 @@ impl Llc {
                 data_category: prim.data_class_info,
                 chan_alloc: prim.chan_alloc,
                 tx_reporter: prim.tx_reporter.take(),
+                grant_subslot: false,
             }),
         };
 
@@ -319,6 +320,7 @@ impl Llc {
                 data_category: prim.data_class_info,
                 chan_alloc: prim.chan_alloc,
                 tx_reporter: Some(tx_reporter.clone()),
+                grant_subslot: true,
             }),
         };
 
@@ -713,6 +715,7 @@ impl Llc {
                     data_category: None,            // TODO FIXME
                     chan_alloc,
                     tx_reporter: None, // By definition, no higher layer entity is interested
+                    grant_subslot: false,
                 }),
             };
             queue.push_back(sapmsg);
