@@ -8,7 +8,7 @@ use tetra_saps::{SapMsg, SapMsgInner};
 
 use tetra_pdus::cmce::enums::cmce_pdu_type_ul::CmcePduTypeUl;
 
-use super::subentities::cc_bs::CcBsSubentity;
+use super::subentities::call::CcBsSubentity;
 use super::subentities::sds_bs::SdsBsSubentity;
 use super::subentities::ss_bs::SsBsSubentity;
 
