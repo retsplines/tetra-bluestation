@@ -1,1 +1,2 @@
-pub mod circuit_mgr;
+pub mod circuit_manager;
+pub mod circuit;

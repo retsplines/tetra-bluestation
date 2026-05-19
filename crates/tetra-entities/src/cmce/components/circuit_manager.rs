@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 
 use tetra_core::{Direction, TdmaTime, TimeslotAllocator, TimeslotOwner, frames, multiframes};
-use tetra_pdus::cmce::structs::cmce_circuit::CmceCircuit;
+use crate::cmce::components::circuit::CmceCircuit;
 use tetra_saps::{
     control::enums::{circuit_mode_type::CircuitModeType, communication_type::CommunicationType},
     lcmc::CallId,
 };
+use tetra_saps::control::call_control::Circuit;
 
 const D_SETUP_REPEATS: i32 = 1;
 const LATE_ENTRY_INTERVAL_TIMESLOTS: i32 = multiframes!(5);
@@ -17,16 +18,17 @@ pub enum CircuitErr {
     CircuitNotActive,
 }
 
-pub enum CircuitMgrCmd {
-    SendDSetup(CallId, u8, u8), // call id, usage number, timeslot
-    SendClose(CallId, CmceCircuit),
+pub enum CircuitManagerEvent {
+    CircuitClosed(Circuit),
 }
 
-pub struct CircuitMgr {
-    pub dltime: TdmaTime,
+pub struct CircuitManager {
+
+    dltime: TdmaTime,
 
     /// Holds any Dl and Dl+Ul circuits
     pub dl: [Option<CmceCircuit>; 4],
+
     /// Holds any Ul-only circuits, with no recipients on this cell
     pub ul_only: [Option<CmceCircuit>; 4],
 
@@ -39,7 +41,7 @@ pub struct CircuitMgr {
     pub next_usage_number: u8,
 }
 
-impl CircuitMgr {
+impl CircuitManager {
     pub fn new() -> Self {
         Self {
             dltime: TdmaTime::default(),
@@ -121,53 +123,6 @@ impl CircuitMgr {
         usage
     }
 
-    /// Finds a free timeslot for the given direction (Ul, Dl or Both)
-    fn get_free_ts(&self, dir: Direction) -> Result<u8, CircuitErr> {
-        // TODO FIXME we may do a bit smarter allocation here
-        for ts in 2..=4 {
-            let (dl_active, ul_active) = self.is_active(ts);
-            match (dir, dl_active, ul_active) {
-                (Direction::Dl, false, _) => return Ok(ts),
-                (Direction::Ul, false, false) => return Ok(ts),
-                (Direction::Ul, true, false) => {
-                    // Check if dl circuit covers Dl+Ul
-                    let dl = self.dl[ts as usize - 1].as_ref().unwrap();
-                    if dl.direction != Direction::Both {
-                        return Ok(ts);
-                    }
-                }
-                (Direction::Both, false, false) => return Ok(ts),
-                _ => {}
-            }
-        }
-        Err(CircuitErr::NoCircuitFree)
-    }
-
-    pub fn allocate_circuit(&mut self, dir: Direction, comm_type: CommunicationType) -> Result<&CmceCircuit, CircuitErr> {
-        // Get timeslot, call_id and usage
-        let ts = self.get_free_ts(dir)?;
-        let call_id = self.get_next_call_id();
-        let usage = self.get_next_usage_number();
-
-        // Create circuit
-        let circuit = CmceCircuit {
-            ts_created: self.dltime,
-            direction: dir,
-            ts,
-            call_id,
-            usage,
-            circuit_mode: CircuitModeType::TchS, // TODO: only speech supported for now
-            // endpoint_id: 0, // TODO, we don't use endpoints as of yet
-            comm_type,
-            simplex_duplex: false,   // TODO, simplex only for now
-            speech_service: Some(0), // TODO, only TETRA encoded speech for now
-            etee_encrypted: false,   // TODO, no encryption for now
-        };
-
-        // Register circuit and return
-        Ok(self.open_circuit(dir, circuit)?)
-    }
-
     /// Allocate circuit using centralized timeslot allocator
     pub fn allocate_circuit_with_allocator(
         &mut self,
@@ -176,6 +131,7 @@ impl CircuitMgr {
         timeslot_alloc: &mut TimeslotAllocator,
         owner: TimeslotOwner,
     ) -> Result<&CmceCircuit, CircuitErr> {
+
         // Get timeslot from centralized allocator
         let ts = timeslot_alloc.allocate_any(owner).ok_or(CircuitErr::NoCircuitFree)?;
 
@@ -265,7 +221,7 @@ impl CircuitMgr {
     /// Take a to-be-transmitted block from the queue
     pub fn take_block(&mut self, ts: u8) -> Result<Option<Vec<u8>>, CircuitErr> {
         if !self.is_active_dir(ts, Direction::Dl) {
-            return Err(CircuitErr::CircuitNotActive);
+            Err(CircuitErr::CircuitNotActive)
         } else {
             Ok(self.tx_data[ts as usize - 1].pop_front())
         }
@@ -274,7 +230,7 @@ impl CircuitMgr {
     /// Closes any circuits that have expired.
     /// Safety timeout: 6 minutes (beyond the 5-minute call timeout T5m).
     /// Active calls are cleaned up earlier by CMCE hangtime/release logic.
-    fn close_expired_circuits(&mut self, mut tasks: Option<Vec<CircuitMgrCmd>>) -> Option<Vec<CircuitMgrCmd>> {
+    fn close_expired_circuits(&mut self, mut tasks: Option<Vec<CircuitMgrCmd>>) -> Option<Vec<CircuitManagerEvent>> {
         const CIRCUIT_EXPIRY_TIMESLOTS: i32 = 6 * 60 * 18 * 4; // 6 minutes
 
         let mut to_close: Vec<_> = self
@@ -298,41 +254,15 @@ impl CircuitMgr {
         tasks
     }
 
-    pub fn tick_start(&mut self, dltime: TdmaTime) -> Option<Vec<CircuitMgrCmd>> {
+    /// Tick start handler for the Circuit Manager
+    pub fn tick_start(&mut self, dltime: TdmaTime) -> Option<Vec<CircuitManagerEvent>> {
         self.dltime = dltime;
-        let mut tasks = None;
 
         if dltime.t == 1 {
             // First, close any expired circuits
-            tasks = self.close_expired_circuits(tasks);
-
-            // Next, go through channels, see if D-SETUPs need to be sent
-            // Late entry: resend D-SETUP every 5 seconds
-            for circuit in self.dl.iter() {
-                if let Some(circuit) = circuit {
-                    let age = circuit.ts_created.age(dltime);
-
-                    // Send D-SETUP for the initial frame + 1 backup frame after circuit creation.
-                    // Matches ETSI Annex D Figure D.2: 1 initial + 1 back-up on MCCH.
-                    if age < frames!(D_SETUP_REPEATS) {
-                        tracing::debug!("CircuitMgr: Sending initial D-SETUP backup for circuit {:?} (age {} frames)", circuit, age);
-                        tasks
-                            .get_or_insert_with(Vec::new)
-                            .push(CircuitMgrCmd::SendDSetup(circuit.call_id, circuit.usage, circuit.ts));
-                    }
-                    // Late entry: resend every 5 seconds.
-                    // Compare in frames (age/4) since tick_start only fires on t==1
-                    // but ts_created may have any timeslot value.
-                    else if (age / 4) % (LATE_ENTRY_INTERVAL_TIMESLOTS / 4) == 0 {
-                        tracing::debug!("CircuitMgr: Sending late-entry D-SETUP for circuit {:?} (age {} frames)", circuit, age);
-                        tasks
-                            .get_or_insert_with(Vec::new)
-                            .push(CircuitMgrCmd::SendDSetup(circuit.call_id, circuit.usage, circuit.ts));
-                    }
-                }
-            }
-            return tasks;
+            return self.close_expired_circuits(tasks);
         }
+
         None
     }
 }

@@ -4,25 +4,11 @@ use tetra_saps::{
     lcmc::CallId,
 };
 
-// #[derive(Debug, Clone, Copy, PartialEq)]
-// pub struct CmceCircuit {
-//     pub direction: Direction,
-//     pub call_id: CallId,
-//     pub ts: u8,
-//     pub endpoint_id: EndpointId,
-//     pub circuit_mode_type: CircuitModeType,
-//     pub communication_type: CommunicationType,
-//     pub simplex_duplex: bool,
-//     pub encryption_flag: bool,
-//     // pub slots_per_frame: Option<u8>, // only relevant for circuit data
-//     /// 2 opt, 00 = TETRA encoded speech, 1|2 = reserved, 3 = proprietary
-//     pub speech_service: Option<u8>,
-// }
-
+/// A circuit managed by the CMCE.
 #[derive(Debug, Clone)]
-pub struct CmceCircuit {
+pub struct Circuit {
+
     /// Time when this circuit was created
-    /// Used to schedule D-SETUP repetitions
     pub ts_created: TdmaTime,
 
     /// Direction

@@ -1,6 +1,7 @@
 use tetra_core::{unimplemented_log, TdmaTime};
 use tetra_pdus::cmce::enums::cmce_pdu_type_ul::CmcePduTypeUl;
 use tetra_saps::{SapMsg, SapMsgInner};
+use tetra_saps::control::call_control::CallControl;
 use crate::cmce::subentities::cc_bs::call::Call;
 use crate::MessageQueue;
 
@@ -47,6 +48,33 @@ impl CcBsSubentity {
             }
             _ => {
                 panic!();
+            }
+        }
+    }
+
+    /// Handle incoming CallControl messages from Brew
+    pub fn rx_call_control(&mut self, queue: &mut MessageQueue, message: SapMsg) {
+        let SapMsgInner::CmceCallControl(call_control) = message.msg else {
+            panic!("Expected CmceCallControl message");
+        };
+
+        match call_control {
+            CallControl::NetworkCallStart {
+                brew_uuid,
+                source_issi,
+                dest_gssi,
+                priority,
+            } => {
+                self.rx_network_call_start(queue, brew_uuid, source_issi, dest_gssi, priority);
+            }
+            CallControl::NetworkCallEnd { brew_uuid } => {
+                self.rx_network_call_end(queue, brew_uuid);
+            }
+            CallControl::UlInactivityTimeout { ts } => {
+                self.handle_ul_inactivity_timeout(queue, ts);
+            }
+            _ => {
+                tracing::warn!("Unexpected CallControl message: {:?}", call_control);
             }
         }
     }
