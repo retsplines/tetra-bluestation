@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
 
 use tetra_core::{Direction, TdmaTime, TimeslotAllocator, TimeslotOwner, frames, multiframes};
-use crate::cmce::components::circuit::CmceCircuit;
 use tetra_saps::{
     control::enums::{circuit_mode_type::CircuitModeType, communication_type::CommunicationType},
     lcmc::CallId,
 };
-use tetra_saps::control::call_control::Circuit;
+use crate::cmce::components::circuit::Circuit;
 
 const D_SETUP_REPEATS: i32 = 1;
 const LATE_ENTRY_INTERVAL_TIMESLOTS: i32 = multiframes!(5);
@@ -27,16 +26,15 @@ pub struct CircuitManager {
     dltime: TdmaTime,
 
     /// Holds any Dl and Dl+Ul circuits
-    pub dl: [Option<CmceCircuit>; 4],
+    pub dl: [Option<Circuit>; 4],
 
     /// Holds any Ul-only circuits, with no recipients on this cell
-    pub ul_only: [Option<CmceCircuit>; 4],
+    /// For example, for calls where the receiving party is on another cell/via network.
+    pub ul_only: [Option<Circuit>; 4],
 
     /// Data blocks queued to be transmitted, per timeslot
     pub tx_data: [VecDeque<Vec<u8>>; 4],
 
-    /// 14-bit call identifier. Zero value is reserved.
-    pub next_call_identifier: u16,
     /// 5-bit usage number. Values 0-3 are reserved.
     pub next_usage_number: u8,
 }
@@ -48,7 +46,6 @@ impl CircuitManager {
             dl: [None, None, None, None],
             ul_only: [None, None, None, None],
             tx_data: [VecDeque::new(), VecDeque::new(), VecDeque::new(), VecDeque::new()],
-            next_call_identifier: 4,
             next_usage_number: 4,
         }
     }
@@ -105,15 +102,6 @@ impl CircuitManager {
         (dl_usage, ul_usage)
     }
 
-    pub fn get_next_call_id(&mut self) -> CallId {
-        let call_id = self.next_call_identifier;
-        self.next_call_identifier += 1;
-        if self.next_call_identifier > 0x3FF {
-            self.next_call_identifier = 1; // Wrap around, skip reserved zero value
-        }
-        call_id
-    }
-
     pub fn get_next_usage_number(&mut self) -> u8 {
         let usage = self.next_usage_number;
         self.next_usage_number += 1;
@@ -127,29 +115,24 @@ impl CircuitManager {
     pub fn allocate_circuit_with_allocator(
         &mut self,
         dir: Direction,
-        comm_type: CommunicationType,
+        call_id: CallId,
         timeslot_alloc: &mut TimeslotAllocator,
         owner: TimeslotOwner,
-    ) -> Result<&CmceCircuit, CircuitErr> {
+    ) -> Result<&Circuit, CircuitErr> {
 
         // Get timeslot from centralized allocator
         let ts = timeslot_alloc.allocate_any(owner).ok_or(CircuitErr::NoCircuitFree)?;
-
-        let call_id = self.get_next_call_id();
         let usage = self.get_next_usage_number();
 
         // Create circuit
-        let circuit = CmceCircuit {
+        let circuit = Circuit {
             ts_created: self.dltime,
             direction: dir,
             ts,
             call_id,
             usage,
             circuit_mode: CircuitModeType::TchS,
-            comm_type,
-            simplex_duplex: false,
             speech_service: Some(0),
-            etee_encrypted: false,
         };
 
         // Register circuit and return
@@ -159,7 +142,7 @@ impl CircuitManager {
     /// Closes any active circuits for given timeslot and direction.
     /// Returns the CmceCircuit
     /// When direction is Both, closes both directions
-    pub fn close_circuit(&mut self, dir: Direction, ts: u8) -> Result<CmceCircuit, CircuitErr> {
+    pub fn close_circuit(&mut self, dir: Direction, ts: u8) -> Result<Circuit, CircuitErr> {
         match dir {
             Direction::Dl | Direction::Both => {
                 self.tx_data[ts as usize - 1].clear();
@@ -180,7 +163,7 @@ impl CircuitManager {
     /// Creates a new circuit on the given direction and timeslot
     /// This channel should be free, if not, warnings will be issued and existing circuit will be closed first
     /// Consumes the circuit but returns a reference
-    fn open_circuit(&mut self, dir: Direction, circuit: CmceCircuit) -> Result<&CmceCircuit, CircuitErr> {
+    fn open_circuit(&mut self, dir: Direction, circuit: Circuit) -> Result<&Circuit, CircuitErr> {
         // Sanity check, close circuit and issue warning if exists
         let ts = circuit.ts;
         let (dl_active, ul_active) = self.is_active(ts);
