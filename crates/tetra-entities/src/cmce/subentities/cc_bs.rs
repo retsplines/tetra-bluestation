@@ -640,6 +640,7 @@ impl CcBsSubentity {
             for task in tasks {
                 match task {
                     CircuitMgrCmd::SendDSetup(call_id, usage, ts) => {
+
                         // Skip late-entry D-SETUP during hangtime. The traffic channel is still
                         // allocated and sending D-SETUP with NotGranted can prevent floor requests.
                         if let Some(active) = self.active_calls.get(&call_id) {
@@ -668,6 +669,8 @@ impl CcBsSubentity {
                             if r.get_state() == TxState::Discarded {
                                 tracing::debug!("Previous D-SETUP for call_id={} was discarded by UMAC, retrying", call_id);
                             }
+                        } else {
+                            tracing::debug!("No previous D-SETUP receipt for call_id={}, sending first time", call_id);
                         }
 
                         // Update transmission_grant based on current call state:

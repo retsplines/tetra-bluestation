@@ -310,12 +310,22 @@ impl CircuitMgr {
             // Late entry: resend D-SETUP every 5 seconds
             for circuit in self.dl.iter() {
                 if let Some(circuit) = circuit {
-                    let age = circuit.ts_created.age(dltime);
 
-                    // Send D-SETUP for the initial frame + 1 backup frame after circuit creation.
+                    // Initial D-SETUP will likely be sent in the next MCCH slot after the circuit creation
+                    // So base the D-SETUP repeats schedule on that
+                    let initial_d_setup_sent = circuit.ts_created.forward_to_timeslot(1);
+                    let age = initial_d_setup_sent.age(dltime);
+                    tracing::debug!("Now {}, Circuit created {}, Assumed D-SETUP sent in {}, age = {} slots", dltime, circuit.ts_created, initial_d_setup_sent, age);
+
+                    // If we haven't sent the initial D-SETUP yet, defer backups until then
+                    if age <= 0 {
+                        continue;
+                    }
+
+                    // Send D-SETUP backup 1 backup frame after the initial D-SETUP.
                     // Matches ETSI Annex D Figure D.2: 1 initial + 1 back-up on MCCH.
-                    if age < frames!(D_SETUP_REPEATS) {
-                        tracing::debug!("CircuitMgr: Sending initial D-SETUP backup for circuit {:?} (age {} frames)", circuit, age);
+                    if age == frames!(1) {
+                        tracing::debug!("CircuitMgr: Sending initial D-SETUP backup for circuit {:?} (age {} slots)", circuit, age);
                         tasks
                             .get_or_insert_with(Vec::new)
                             .push(CircuitMgrCmd::SendDSetup(circuit.call_id, circuit.usage, circuit.ts));
@@ -324,7 +334,7 @@ impl CircuitMgr {
                     // Compare in frames (age/4) since tick_start only fires on t==1
                     // but ts_created may have any timeslot value.
                     else if (age / 4) % (LATE_ENTRY_INTERVAL_TIMESLOTS / 4) == 0 {
-                        tracing::debug!("CircuitMgr: Sending late-entry D-SETUP for circuit {:?} (age {} frames)", circuit, age);
+                        tracing::debug!("CircuitMgr: Sending late-entry D-SETUP for circuit {:?} (age {} slots)", circuit, age);
                         tasks
                             .get_or_insert_with(Vec::new)
                             .push(CircuitMgrCmd::SendDSetup(circuit.call_id, circuit.usage, circuit.ts));
