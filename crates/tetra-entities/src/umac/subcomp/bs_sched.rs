@@ -1,4 +1,4 @@
-use tetra_core::{BitBuffer, Direction, PhyBlockNum, PhysicalChannel, TdmaTime, TetraAddress, Todo, TxReporter, unimplemented_log};
+use tetra_core::{BitBuffer, Direction, PhyBlockNum, PhysicalChannel, TdmaTime, TetraAddress, Todo, TxReporter, unimplemented_log, SsiType};
 use tetra_saps::{
     control::call_control::Circuit,
     tmv::{TmvUnitdataReq, TmvUnitdataReqSlot, enums::logical_chans::LogicalChannel},
@@ -29,6 +29,7 @@ use crate::{
     lmac::components::scrambler,
     umac::subcomp::{bs_frag::BsFragger, circuit_mgr::CircuitMgr},
 };
+use crate::umac::subcomp::channel_tracker::ChannelTracker;
 
 /// We submit this many TX timeslots ahead of the current time
 pub const MACSCHED_TX_AHEAD: usize = 1;
@@ -87,6 +88,9 @@ pub struct BsChannelScheduler {
     /// The next STCH built for a matching SSI should carry random_access_flag=true to properly
     /// acknowledge the random access per ETSI 21.4.3.1.
     pending_ra_acks: [Vec<u32>; 4],
+
+    /// Tracker for which SSIs are listening to which downlink physical channels
+    channel_tracker: ChannelTracker
 }
 
 #[derive(Debug)]
@@ -122,7 +126,7 @@ const EMPTY_SCHED_CHANNEL: [TimeslotSchedule; MACSCHED_NUM_FRAMES] = [EMPTY_SCHE
 const EMPTY_SCHED: [[TimeslotSchedule; MACSCHED_NUM_FRAMES]; 4] = [EMPTY_SCHED_CHANNEL; 4];
 
 impl BsChannelScheduler {
-    pub fn new(scrambling_code: u32, precomps: PrecomputedUmacPdus) -> Self {
+    pub fn new(scrambling_code: u32, precomps: PrecomputedUmacPdus, channel_tracker: ChannelTracker) -> Self {
         BsChannelScheduler {
             cur_dltime: TdmaTime { t: 0, f: 0, m: 0, h: 0 }, // Intentionally invalid, updated in tick function
             scrambling_code,
@@ -133,6 +137,7 @@ impl BsChannelScheduler {
             circuits: CircuitMgr::new(),
             hangtime: [false, false, false, false],
             pending_ra_acks: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            channel_tracker
         }
     }
 
@@ -424,10 +429,17 @@ impl BsChannelScheduler {
     }
 
     pub fn dl_enqueue_tma(&mut self, pdu: MacResource, sdu: BitBuffer, tx_reporter: Option<TxReporter>) {
-        // Get all timeslots on which a relevant MS is listening
-        // let timeslots: [u8; NUM_TIMESLOTS] = self.identify_timeslots_for_ssi(pdu.addr);
-        tracing::warn!("identify_timeslots_for_ssi not implemented yet, defaulting to ts1");
-        let timeslots: [u8; NUM_TIMESLOTS] = [1, 0, 0, 0];
+
+        // Get all timeslots on which an MS is listening
+        let timeslots: Vec<u8> = if let Some(addr) = pdu.addr && addr.ssi_type == SsiType::Ssi {
+            self.channel_tracker.get_slots_for_ssi(self.cur_dltime, addr.ssi)
+        } else {
+            // Assume MCCH for unaddressed messages?
+            vec![1]
+        };
+
+        // tracing::warn!("identify_timeslots_for_ssi not implemented yet, defaulting to ts1");
+        // let timeslots: [u8; NUM_TIMESLOTS] = [1, 0, 0, 0];
 
         // Queue the message for all timeslots on which we should transmit this message.
         // The loop basically prevents cloning the last element.
@@ -1453,7 +1465,8 @@ mod tests {
             mle_sync: mle_sync_pdu,
         };
 
-        let mut sched = BsChannelScheduler::new(1, precomps);
+        let channel_tracker = ChannelTracker::new();
+        let mut sched = BsChannelScheduler::new(1, precomps, channel_tracker);
         sched.set_dl_time(TdmaTime::default().add_timeslots(2));
         sched
     }
