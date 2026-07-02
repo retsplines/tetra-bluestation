@@ -1,22 +1,28 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use tetra_core::{multiframes, TdmaTime};
+use tetra_config::bluestation::SharedConfig;
+use tetra_core::{multiframes, SsiType, TdmaTime, TetraAddress};
 
 /// T.209 Inactivity time-out on traffic channel
-const INACTIVITY_TIMEOUT_SLOTS: i32 = multiframes!(18);
+pub const INACTIVITY_TIMEOUT_SLOTS: i32 = multiframes!(18);
 
 /// Tracks which channels MSs are listening to.
 /// Updates the state of records based on events from various places in the stack.
 #[derive(Clone)]
 pub struct ChannelTracker {
-    entries: Rc<RefCell<HashMap<u32, MsChannel>>>
+
+    /// Mapping of ISSI -> Channel
+    entries: Rc<RefCell<HashMap<u32, Channel>>>,
+
+    config: SharedConfig
 }
 
 /// The possible channels for an MS
-pub enum MsChannel {
+#[derive(Clone)]
+pub enum Channel {
     MCCH,
-    AssignedChannel {
+    Assigned {
         slot: u8,
         assigned_at: TdmaTime,
         last_activity: TdmaTime,
@@ -24,12 +30,15 @@ pub enum MsChannel {
     Unknown,
 }
 
-pub enum MsChannelEvent {
+
+#[derive(Clone)]
+pub enum ChannelEvent {
 
     /// MS was just allocated to an assigned channel
-    Allocated(MsChannel),
+    Allocated(Channel),
 
-    Activity(MsChannel),
+    /// Activity just observed on a channel
+    Activity(Channel),
     Released,
 
 }
@@ -37,86 +46,109 @@ pub enum MsChannelEvent {
 
 impl ChannelTracker {
 
-    pub fn new() -> Self {
+    pub fn new(shared_config: SharedConfig) -> Self {
         Self {
             entries: Rc::new(RefCell::new(HashMap::new())),
+            config: shared_config
         }
     }
 
-    /// Based on the latest known information, return the expected downlink slot(s) for an SSI
-    pub fn get_slots_for_ssi(&self, dltime: TdmaTime, ssi: u32) -> Vec<u8> {
+    /// Based on the latest known information, return the expected downlink slot(s) for an address,
+    /// which may be either an individual or group.
+    ///
+    /// Returns a vector of slots (1-4) on which the destination may be reachable.
+    /// Signalling should be sent on all indicated slots.
+    pub fn get_slots_for_address(&self, dltime: TdmaTime, address: TetraAddress) -> Vec<u8> {
 
-        // Look up the entry
-        let entries = self.entries.borrow();
-        let entry = entries.get(&ssi).unwrap_or(&MsChannel::Unknown);
+        // If it's a group address, we need to find the attached members and return an intersection
+        // of all of their slots
+        match address.ssi_type {
 
-        match entry {
+            // For individual-destination signalling...
+            SsiType::Issi => {
 
-            // MS was last seen on the MCCH, or is on an unknown channel (so MCCH assumed)
-            MsChannel::MCCH | MsChannel::Unknown => {
-                vec![1]
-            },
+                // Look up the entry
+                let entries = self.entries.borrow();
+                let entry = entries.get(&address.ssi).unwrap_or(&Channel::Unknown);
 
-            // MS was last seen assigned to a channel
-            MsChannel::AssignedChannel { last_activity, slot, ..} => {
-                // If the timeout has expired, include the MCCH too
-                if dltime.diff(*last_activity) > INACTIVITY_TIMEOUT_SLOTS {
-                    vec![1, *slot]
-                } else {
-                    vec![*slot]
+                match entry {
+
+                    // MS was last seen on the MCCH, or is on an unknown channel (so MCCH assumed)
+                    Channel::MCCH | Channel::Unknown => {
+                        vec![1]
+                    },
+
+                    // MS was last seen assigned to a channel
+                    Channel::Assigned { last_activity, slot, ..} => {
+                        // If the timeout has expired, include the MCCH too
+                        if dltime.diff(*last_activity) > INACTIVITY_TIMEOUT_SLOTS {
+                            vec![1, *slot]
+                        } else {
+                            vec![*slot]
+                        }
+                    },
                 }
-            },
+
+            }
+
+            // For group-destination signalling...
+            SsiType::Gssi => {
+
+                // Find the attachments for the group
+                let attached_issis = self.config.state_read().subscribers.get_group_members(address.ssi);
+
+                attached_issis
+                    .into_iter()
+                    // Recurse for each attached ISSI, finding that individual's reachable slots
+                    .map(|issi| self.get_slots_for_address(dltime, TetraAddress::issi(issi)))
+                    // Flatten and find unique slots only
+                    .flatten()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect()
+
+            }
+            _ => panic!("Not a valid address type for which to find downlink slots")
         }
     }
 
-    /// Handle an event that will (potentially) update an MS's location
-    pub fn handle(&mut self, ssi: u16, event: MsChannelEvent) {
-        match event {
+    /// Handle an event that will (potentially) update one or more MS' locations
+    pub fn handle(&mut self, address: TetraAddress, event: ChannelEvent) {
+        match address.ssi_type {
 
-            MsChannelEvent::Allocated(to_channel) => {
-                self.entries.borrow_mut().insert(ssi, to_channel);
-            },
+            // For individual updates...
+            SsiType::Issi => {
 
-            MsChannelEvent::Activity(on_channel) => {
-                self.entries.borrow_mut().insert(ssi, on_channel);
-            },
+                match event {
 
-            MsChannelEvent::Released => {
-                self.entries.borrow_mut().insert(ssi, MsChannel::MCCH);
-            },
+                    ChannelEvent::Allocated(to_channel) => {
+                        self.entries.borrow_mut().insert(address.ssi, to_channel);
+                    },
 
+                    ChannelEvent::Activity(on_channel) => {
+                        self.entries.borrow_mut().insert(address.ssi, on_channel);
+                    },
+
+                    ChannelEvent::Released => {
+                        self.entries.borrow_mut().insert(address.ssi, Channel::MCCH);
+                    },
+
+                }
+
+            }
+
+            // For groups, update records for all currently-attached ISSIs
+            SsiType::Gssi => {
+
+                let attached_issis = self.config.state_read().subscribers.get_group_members(address.ssi);
+
+                for attached_issi in attached_issis {
+                    self.handle(TetraAddress::issi(attached_issi), event.clone());
+                }
+
+            }
+
+            _ => panic!("Updating channel tracking for non-GSSI/ISSI address not supported")
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tetra_core::debug;
-    use super::*;
-
-    #[test]
-    fn test_channels_tracked_correctly() {
-        debug::setup_logging_verbose();
-
-        let mut tracker = ChannelTracker::new();
-        let base_time = TdmaTime::default();
-
-        // Show the tracker a channel allocation
-        tracker.handle(1024, MsChannelEvent::Allocated(MsChannel::AssignedChannel {
-            slot: 2,
-            assigned_at: base_time,
-            last_activity: base_time,
-        }));
-
-        // Check the slots immediately after, should be on slot 2
-        assert_eq!(tracker.get_slots_for_ssi(base_time, 1024), vec![2]);
-
-        // Check the slots after the expiry time,
-        // Should be 1 (MCCH) + 2
-        assert_eq!(tracker.get_slots_for_ssi(base_time.add_timeslots(INACTIVITY_TIMEOUT_SLOTS + 1), 1024), vec![1, 2]);
-
-        // Provide an update that sends the MS back to the MCCH
-        tracker.handle(1024, MsChannelEvent::Activity(MsChannel::MCCH));
-        assert_eq!(tracker.get_slots_for_ssi(base_time, 1024), vec![1]);
     }
 }

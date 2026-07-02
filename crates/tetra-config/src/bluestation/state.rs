@@ -86,6 +86,15 @@ impl SubscriberRegistry {
     pub fn has_group_members(&self, gssi: u32) -> bool {
         self.all_attached_groups.contains(&gssi)
     }
+
+    /// Find subscribers affiliated with a given GSSI
+    pub fn get_group_members(&self, gssi: u32) -> Vec<u32> {
+        self.subscribers
+            .values()
+            .filter(|s| s.attached_groups.contains(&gssi))
+            .map(|x| x.issi)
+            .collect()
+    }
 }
 
 /// Mutable, stack-editable state (mutex-protected).

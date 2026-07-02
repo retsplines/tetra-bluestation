@@ -79,7 +79,7 @@ impl UmacBs {
         let scrambling_code = scrambler::tetra_scramb_get_init(c.net.mcc, c.net.mnc, c.cell.colour_code);
         let system_wide_services = Self::get_system_wide_services_state(&config);
         let precomps = Self::generate_precomps(&config);
-        let channel_tracker = ChannelTracker::new();
+        let channel_tracker = ChannelTracker::new(config.clone());
         Self {
             self_component: TetraEntity::Umac,
             config,
@@ -89,7 +89,7 @@ impl UmacBs {
             defrag: BsDefrag::new(),
             pending_stch: None,
             // event_label_store: EventLabelStore::new(),
-            channel_scheduler: BsChannelScheduler::new(scrambling_code, precomps, channel_tracker.clone()),
+            channel_scheduler: BsChannelScheduler::new(scrambling_code, precomps),
             last_ul_voice: [None; 4],
             channel_tracker
         }

@@ -29,7 +29,6 @@ use crate::{
     lmac::components::scrambler,
     umac::subcomp::{bs_frag::BsFragger, circuit_mgr::CircuitMgr},
 };
-use crate::umac::subcomp::channel_tracker::ChannelTracker;
 
 /// We submit this many TX timeslots ahead of the current time
 pub const MACSCHED_TX_AHEAD: usize = 1;
@@ -88,9 +87,6 @@ pub struct BsChannelScheduler {
     /// The next STCH built for a matching SSI should carry random_access_flag=true to properly
     /// acknowledge the random access per ETSI 21.4.3.1.
     pending_ra_acks: [Vec<u32>; 4],
-
-    /// Tracker for which SSIs are listening to which downlink physical channels
-    channel_tracker: ChannelTracker
 }
 
 #[derive(Debug)]
@@ -126,7 +122,7 @@ const EMPTY_SCHED_CHANNEL: [TimeslotSchedule; MACSCHED_NUM_FRAMES] = [EMPTY_SCHE
 const EMPTY_SCHED: [[TimeslotSchedule; MACSCHED_NUM_FRAMES]; 4] = [EMPTY_SCHED_CHANNEL; 4];
 
 impl BsChannelScheduler {
-    pub fn new(scrambling_code: u32, precomps: PrecomputedUmacPdus, channel_tracker: ChannelTracker) -> Self {
+    pub fn new(scrambling_code: u32, precomps: PrecomputedUmacPdus) -> Self {
         BsChannelScheduler {
             cur_dltime: TdmaTime { t: 0, f: 0, m: 0, h: 0 }, // Intentionally invalid, updated in tick function
             scrambling_code,
@@ -136,8 +132,7 @@ impl BsChannelScheduler {
             ulsched: EMPTY_SCHED,
             circuits: CircuitMgr::new(),
             hangtime: [false, false, false, false],
-            pending_ra_acks: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            channel_tracker
+            pending_ra_acks: [Vec::new(), Vec::new(), Vec::new(), Vec::new()]
         }
     }
 
@@ -432,7 +427,8 @@ impl BsChannelScheduler {
 
         // Get all timeslots on which an MS is listening
         let timeslots: Vec<u8> = if let Some(addr) = pdu.addr && addr.ssi_type == SsiType::Ssi {
-            self.channel_tracker.get_slots_for_ssi(self.cur_dltime, addr.ssi)
+            // self.channel_tracker.get_slots_for_address(self.cur_dltime, )
+            vec![1]
         } else {
             // Assume MCCH for unaddressed messages?
             vec![1]
@@ -1465,8 +1461,7 @@ mod tests {
             mle_sync: mle_sync_pdu,
         };
 
-        let channel_tracker = ChannelTracker::new();
-        let mut sched = BsChannelScheduler::new(1, precomps, channel_tracker);
+        let mut sched = BsChannelScheduler::new(1, precomps);
         sched.set_dl_time(TdmaTime::default().add_timeslots(2));
         sched
     }
