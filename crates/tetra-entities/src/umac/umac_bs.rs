@@ -35,7 +35,7 @@ use crate::lmac::components::scrambler;
 use crate::umac::subcomp::bs_sched::{BsChannelScheduler, PrecomputedUmacPdus, TCH_S_CAP};
 use crate::umac::subcomp::fillbits;
 use crate::{MessagePrio, MessageQueue, TetraEntityTrait};
-use crate::umac::subcomp::channel_tracker::ChannelTracker;
+use crate::umac::subcomp::slot_locator::channel_tracking_slot_locator::ChannelTrackingSlotLocator;
 use super::subcomp::bs_defrag::BsDefrag;
 
 pub struct UmacBs {
@@ -62,7 +62,7 @@ pub struct UmacBs {
     last_ul_voice: [Option<TdmaTime>; 4],
 
     /// Tracker for which SSIs are listening to which downlink physical channels
-    channel_tracker: ChannelTracker
+    channel_tracker: ChannelTrackingSlotLocator
 }
 
 struct PendingStch {
@@ -79,7 +79,7 @@ impl UmacBs {
         let scrambling_code = scrambler::tetra_scramb_get_init(c.net.mcc, c.net.mnc, c.cell.colour_code);
         let system_wide_services = Self::get_system_wide_services_state(&config);
         let precomps = Self::generate_precomps(&config);
-        let channel_tracker = ChannelTracker::new(config.clone());
+        let channel_tracker = ChannelTrackingSlotLocator::new(config.clone());
         Self {
             self_component: TetraEntity::Umac,
             config,
@@ -89,7 +89,7 @@ impl UmacBs {
             defrag: BsDefrag::new(),
             pending_stch: None,
             // event_label_store: EventLabelStore::new(),
-            channel_scheduler: BsChannelScheduler::new(scrambling_code, precomps),
+            channel_scheduler: BsChannelScheduler::new(scrambling_code, precomps, Box::new(channel_tracker.clone())),
             last_ul_voice: [None; 4],
             channel_tracker
         }

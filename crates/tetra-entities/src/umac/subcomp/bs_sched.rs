@@ -1,4 +1,4 @@
-use tetra_core::{BitBuffer, Direction, PhyBlockNum, PhysicalChannel, TdmaTime, TetraAddress, Todo, TxReporter, unimplemented_log, SsiType};
+use tetra_core::{BitBuffer, Direction, PhyBlockNum, PhysicalChannel, TdmaTime, TetraAddress, Todo, TxReporter, unimplemented_log };
 use tetra_saps::{
     control::call_control::Circuit,
     tmv::{TmvUnitdataReq, TmvUnitdataReqSlot, enums::logical_chans::LogicalChannel},
@@ -26,6 +26,7 @@ use tetra_pdus::{
         },
     },
 };
+use crate::umac::subcomp::slot_locator::slot_locator::SlotLocator;
 
 /// We submit this many TX timeslots ahead of the current time
 pub const MACSCHED_TX_AHEAD: usize = 1;
@@ -84,6 +85,9 @@ pub struct BsChannelScheduler {
     /// The next STCH built for a matching SSI should carry random_access_flag=true to properly
     /// acknowledge the random access per ETSI 21.4.3.1.
     pending_ra_acks: [Vec<u32>; 4],
+
+    /// Selects which downlink slot(s) messages for a given address need to be sent on
+    slot_locator: Box<dyn SlotLocator>
 }
 
 #[derive(Debug)]
@@ -119,7 +123,7 @@ const EMPTY_SCHED_CHANNEL: [TimeslotSchedule; MACSCHED_NUM_FRAMES] = [EMPTY_SCHE
 const EMPTY_SCHED: [[TimeslotSchedule; MACSCHED_NUM_FRAMES]; 4] = [EMPTY_SCHED_CHANNEL; 4];
 
 impl BsChannelScheduler {
-    pub fn new(scrambling_code: u32, precomps: PrecomputedUmacPdus) -> Self {
+    pub fn new(scrambling_code: u32, precomps: PrecomputedUmacPdus, slot_locator: Box<dyn SlotLocator>) -> Self {
         BsChannelScheduler {
             cur_dltime: TdmaTime { t: 0, f: 0, m: 0, h: 0 }, // Intentionally invalid, updated in tick function
             scrambling_code,
@@ -129,7 +133,8 @@ impl BsChannelScheduler {
             ulsched: EMPTY_SCHED,
             circuits: CircuitMgr::new(),
             hangtime: [false, false, false, false],
-            pending_ra_acks: [Vec::new(), Vec::new(), Vec::new(), Vec::new()]
+            pending_ra_acks: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            slot_locator,
         }
     }
 
@@ -426,25 +431,19 @@ impl BsChannelScheduler {
 
     pub fn dl_enqueue_tma(&mut self, pdu: MacResource, sdu: BitBuffer, tx_reporter: Option<TxReporter>) {
 
-        // Get all timeslots on which an MS is listening
-        let timeslots: Vec<u8> = if let Some(addr) = pdu.addr && addr.ssi_type == SsiType::Ssi {
-            // self.channel_tracker.get_slots_for_address(self.cur_dltime, )
-            vec![1]
+        let is_listening: [bool; NUM_TIMESLOTS] = if let Some(dest_addr) = pdu.addr {
+            self.slot_locator.get_slots_for_address(self.cur_dltime, dest_addr)
         } else {
-            // Assume MCCH for unaddressed messages?
-            vec![1]
+            // Not an addressed PDU, so default to MCCH
+            [true, false, false, false]
         };
 
-        // tracing::warn!("identify_timeslots_for_ssi not implemented yet, defaulting to ts1");
-        // let timeslots: [u8; NUM_TIMESLOTS] = [1, 0, 0, 0];
+        // Timeslots are 1-based; is_listening is indexed by ts - 1.
+        let active_ts: Vec<u8> = (1..=NUM_TIMESLOTS as u8).filter(|&ts| is_listening[ts as usize - 1]).collect();
+        let (last_ts, other_ts) = active_ts.split_last().expect("dl_enqueue_tma: no timeslots to transmit on");
 
-        // Queue the message for all timeslots on which we should transmit this message.
-        // The loop basically prevents cloning the last element.
-        for i in 0..NUM_TIMESLOTS {
-            let ts = timeslots[i];
-            let next_ts = if i < NUM_TIMESLOTS - 1 { timeslots[i + 1] } else { 0 };
-            assert!(ts > 0);
-
+        // Queue the message for every timeslot but the last one, cloning as we go.
+        for &ts in other_ts {
             tracing::debug!(
                 "dl_enqueue_tma: ts {} enqueueing {} PDU {:?} SDU {}",
                 if tx_reporter.is_some() { "reported" } else { "" },
@@ -452,20 +451,23 @@ impl BsChannelScheduler {
                 pdu,
                 sdu.dump_bin(),
             );
-
-            if next_ts > 0 {
-                // There is another ts for which we need to transmit this message.
-                // Clone the message now and push it to the current ts.
-                let elem = DlSchedElem::Resource(pdu.clone(), sdu.clone(), tx_reporter.clone());
-                self.dltx_queues[ts as usize - 1].push(elem);
-            } else {
-                // This is the last ts on which we need to transmit this message
-                let elem = DlSchedElem::Resource(pdu, sdu, tx_reporter);
-                self.dltx_queues[ts as usize - 1].push(elem);
-                break;
-            }
+            let elem = DlSchedElem::Resource(pdu.clone(), sdu.clone(), tx_reporter.clone());
+            self.dltx_queues[ts as usize - 1].push(elem);
         }
+
+        // Queue the message for the last timeslot, moving the values instead of cloning.
+        tracing::debug!(
+            "dl_enqueue_tma: ts {} enqueueing {} PDU {:?} SDU {}",
+            if tx_reporter.is_some() { "reported" } else { "" },
+            last_ts,
+            pdu,
+            sdu.dump_bin(),
+        );
+        let elem = DlSchedElem::Resource(pdu, sdu, tx_reporter);
+        self.dltx_queues[*last_ts as usize - 1].push(elem);
     }
+
+
 
     /// Consumes and returns true if a pending random access ack exists for the given SSI on
     /// this timeslot. Used when building STCH blocks so the MAC-RESOURCE can carry
@@ -1338,10 +1340,11 @@ mod tests {
             pdus::{mac_sync::MacSync, mac_sysinfo::MacSysinfo},
         },
     };
-
+    use crate::umac::subcomp::slot_locator::simple_slot_locator::SimpleSlotLocator;
     use super::*;
 
     pub fn get_testing_slotter() -> BsChannelScheduler {
+
         let _guard = setup_logging_default(None);
         let ext_services = SysinfoExtendedServices {
             auth_required: false,
@@ -1450,7 +1453,9 @@ mod tests {
             mle_sync: mle_sync_pdu,
         };
 
-        let mut sched = BsChannelScheduler::new(1, precomps);
+
+        let slot_locator = Box::new(SimpleSlotLocator::new());
+        let mut sched = BsChannelScheduler::new(1, precomps, slot_locator);
         sched.set_dl_time(TdmaTime::default().add_timeslots(2));
         sched
     }
